@@ -15,7 +15,7 @@
 mod context;
 
 use crate::syscall::syscall;
-use crate::task::{exit_current_and_run_next, suspend_current_and_run_next};
+use crate::task::{exit_current_and_run_next, suspend_current_and_run_next, TASK_MANAGER};
 use crate::timer::set_next_trigger;
 use core::arch::global_asm;
 use riscv::register::{
@@ -51,10 +51,14 @@ pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
                                // trace!("into {:?}", scause.cause());
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
-            // jump to next instruction anyway
             cx.sepc += 4;
-            // get system call return value
-            cx.x[10] = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]) as usize;
+            let syscall_id: usize = cx.x[17];
+            // 在分发之前计数：这样 sys_trace 自身也会被计入，
+            // 且每个系统调用只会计数一次。add_syscall_count 内部已经
+            // 获取并释放了 TASK_MANAGER 的锁，不会与 sys_trace 死锁。
+            TASK_MANAGER.add_syscall_count(syscall_id);
+            let ret: isize = syscall(syscall_id, [cx.x[10], cx.x[11], cx.x[12]]);
+            cx.x[10] = ret as usize;
         }
         Trap::Exception(Exception::StoreFault) | Trap::Exception(Exception::StorePageFault) => {
             println!("[kernel] PageFault in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.", stval, cx.sepc);

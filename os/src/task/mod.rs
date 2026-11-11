@@ -14,7 +14,7 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::config::MAX_APP_NUM;
+use crate::config::{MAX_APP_NUM, MAX_SYSCALL_NUM};
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
 use lazy_static::*;
@@ -54,6 +54,7 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            syscall_cnt: [0; MAX_SYSCALL_NUM],
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -88,6 +89,30 @@ impl TaskManager {
             __switch(&mut _unused as *mut TaskContext, next_task_cx_ptr);
         }
         panic!("unreachable in run_first_task!");
+    }
+    /// 当前任务对 `syscall_id` 的调用次数 +1。
+    ///
+    /// 注意：`TASK_MANAGER` 是不可变静态量，这里必须用 `&self`；
+    /// `inner` 在函数返回时自动释放，绝不能跨越 `syscall()` 持有。
+    pub fn add_syscall_count(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let curr_id = inner.current_task;
+        if syscall_id < MAX_SYSCALL_NUM {
+            inner.tasks[curr_id].syscall_cnt[syscall_id] += 1;
+        }
+        // 显式释放锁，避免后续 sys_trace 再次上锁时发生 RefCell 重复借用
+        drop(inner);
+    }
+
+    /// 查询当前任务对 `syscall_id` 的调用次数，越界返回 -1。
+    pub fn get_syscall_count(&self, syscall_id: usize) -> isize {
+        let inner = self.inner.exclusive_access();
+        let curr_id = inner.current_task;
+        if syscall_id < MAX_SYSCALL_NUM {
+            inner.tasks[curr_id].syscall_cnt[syscall_id] as isize
+        } else {
+            -1
+        }
     }
 
     /// Change the status of current `Running` task into `Ready`.

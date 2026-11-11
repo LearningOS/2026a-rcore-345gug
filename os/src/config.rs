@@ -19,3 +19,9 @@ pub const APP_SIZE_LIMIT: usize = 0x20000;
 pub const CLOCK_FREQ: usize = 12500000;
 /// the physical memory end
 pub const MEMORY_END: usize = 0x88000000;
+/// max syscall number
+/// 系统调用号最大为 410（sys_trace），计数数组按系统调用号直接下标寻址，
+/// 因此长度必须大于 410。这里与上游参考实现保持一致取 500。
+pub const MAX_SYSCALL_NUM: usize = 500;
+/// 用户态可访问地址的上界（不含），用于校验用户指针
+pub const MAXVA: usize = 1 << (8 * 8 - 1);
