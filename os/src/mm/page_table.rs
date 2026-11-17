@@ -133,12 +133,51 @@ impl PageTable {
         }
         result
     }
+    /// Find PageTableEntry by VirtPageNum, create a frame for a 4KB page table
+    /// if not exist. Unlike [`Self::find_pte_create`], this version returns
+    /// `None` instead of panicking when physical memory is exhausted.
+    fn find_pte_create_checked(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+        let idxs = vpn.indexes();
+        let mut ppn = self.root_ppn;
+        let mut result: Option<&mut PageTableEntry> = None;
+        for (i, idx) in idxs.iter().enumerate() {
+            let pte = &mut ppn.get_pte_array()[*idx];
+            if i == 2 {
+                result = Some(pte);
+                break;
+            }
+            if !pte.is_valid() {
+                let frame = frame_alloc()?;
+                *pte = PageTableEntry::new(frame.ppn, PTEFlags::V);
+                self.frames.push(frame);
+            }
+            ppn = pte.ppn();
+        }
+        result
+    }
     /// set the map between virtual page number and physical page number
     #[allow(unused)]
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
+    }
+    /// Set the map between virtual page number and physical page number,
+    /// returning `false` if the virtual page is already mapped or if no
+    /// frame is available for a missing intermediate page table.
+    ///
+    /// This is the fallible counterpart of [`Self::map`] used by `mmap`.
+    pub fn map_checked(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) -> bool {
+        match self.find_pte_create_checked(vpn) {
+            Some(pte) => {
+                if pte.is_valid() {
+                    return false;
+                }
+                *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
+                true
+            }
+            None => false,
+        }
     }
     /// remove the map between virtual page number and physical page number
     #[allow(unused)]

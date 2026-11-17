@@ -262,6 +262,74 @@ impl MemorySet {
             false
         }
     }
+
+    /// Map `[start, start + len)` as a new anonymous (`Framed`) area.
+    ///
+    /// Returns `false` if any page in the range is already mapped or if
+    /// physical memory is exhausted. Following the lab convention, pages
+    /// that were already mapped when an allocation fails are not rolled
+    /// back: the partially built area is kept in `areas` so that its
+    /// [`FrameTracker`]s stay alive as long as the PTEs reference them.
+    pub fn mmap(&mut self, start: VirtAddr, len: usize, permission: MapPermission) -> bool {
+        let page_count = len.div_ceil(PAGE_SIZE);
+        if page_count == 0 {
+            return true;
+        }
+        let start_vpn = start.floor();
+        let end_vpn = VirtPageNum(start_vpn.0 + page_count);
+        let mut area = MapArea::new(start, VirtAddr::from(end_vpn), MapType::Framed, permission);
+        // Refuse the whole request if any page is already mapped.
+        for vpn in area.vpn_range {
+            if self
+                .page_table
+                .translate(vpn)
+                .map_or(false, |pte| pte.is_valid())
+            {
+                return false;
+            }
+        }
+        // Map page by page; stop on the first allocation failure.
+        let mut success = true;
+        for vpn in area.vpn_range {
+            if !area.try_map_one(&mut self.page_table, vpn) {
+                success = false;
+                break;
+            }
+        }
+        // Keep the (possibly partial) area: its FrameTrackers must outlive
+        // the PTEs that were already installed.
+        self.areas.push(area);
+        success
+    }
+
+    /// Unmap `[start, start + len)`.
+    ///
+    /// Returns `false` without changing anything if any page in the range
+    /// is not mapped.
+    pub fn munmap(&mut self, start: VirtAddr, len: usize) -> bool {
+        let page_count = len.div_ceil(PAGE_SIZE);
+        if page_count == 0 {
+            return true;
+        }
+        let start_vpn = start.floor();
+        let end_vpn = VirtPageNum(start_vpn.0 + page_count);
+        // Validate the whole range first, so that a bad request is a no-op.
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            match self.page_table.translate(vpn) {
+                Some(pte) if pte.is_valid() => {}
+                _ => return false,
+            }
+        }
+        // Remove the PTEs and release the frames owned by the map areas.
+        let mut tails = Vec::new();
+        for area in self.areas.iter_mut() {
+            if let Some(tail) = area.unmap_range(&mut self.page_table, start_vpn, end_vpn) {
+                tails.push(tail);
+            }
+        }
+        self.areas.extend(tails);
+        true
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
@@ -333,6 +401,80 @@ impl MapArea {
             self.map_one(page_table, vpn)
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
+    }
+    /// Try to map one page of this area, returning `false` if no physical
+    /// frame is available. The frame is recorded in `data_frames` even if
+    /// installing the PTE fails, so it can never be freed while the page
+    /// table might still reference it.
+    pub fn try_map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> bool {
+        let ppn = match self.map_type {
+            MapType::Identical => PhysPageNum(vpn.0),
+            MapType::Framed => match frame_alloc() {
+                Some(frame) => {
+                    let ppn = frame.ppn;
+                    self.data_frames.insert(vpn, frame);
+                    ppn
+                }
+                None => return false,
+            },
+        };
+        let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+        page_table.map_checked(vpn, ppn, pte_flags)
+    }
+    /// Remove `[start_vpn, end_vpn)` from this area.
+    ///
+    /// The caller guarantees that every page in the range is mapped. If the
+    /// removed range lies strictly inside the area, the remaining tail is
+    /// returned as a new area so that `areas` keeps describing exactly the
+    /// mapped virtual pages.
+    fn unmap_range(
+        &mut self,
+        page_table: &mut PageTable,
+        start_vpn: VirtPageNum,
+        end_vpn: VirtPageNum,
+    ) -> Option<MapArea> {
+        let old_start = self.vpn_range.get_start();
+        let old_end = self.vpn_range.get_end();
+        if end_vpn <= old_start || old_end <= start_vpn {
+            return None;
+        }
+        let remove_start = start_vpn.max(old_start);
+        let remove_end = end_vpn.min(old_end);
+        for vpn in VPNRange::new(remove_start, remove_end) {
+            self.data_frames.remove(&vpn);
+            page_table.unmap(vpn);
+        }
+        let tail = if remove_start > old_start && remove_end < old_end {
+            // The removed range splits this area into two disjoint parts.
+            let mut tail = MapArea::new(
+                VirtAddr::from(remove_end),
+                VirtAddr::from(old_end),
+                self.map_type,
+                self.map_perm,
+            );
+            for vpn in VPNRange::new(remove_end, old_end) {
+                if let Some(frame) = self.data_frames.remove(&vpn) {
+                    tail.data_frames.insert(vpn, frame);
+                }
+            }
+            Some(tail)
+        } else {
+            None
+        };
+        self.vpn_range = if remove_start == old_start && remove_end == old_end {
+            // The whole area is gone; keep an empty range as a placeholder.
+            VPNRange::new(old_start, old_start)
+        } else if remove_start == old_start {
+            // Only a prefix was removed.
+            VPNRange::new(remove_end, old_end)
+        } else if remove_end == old_end {
+            // Only a suffix was removed.
+            VPNRange::new(old_start, remove_start)
+        } else {
+            // A middle part was removed; `tail` describes the rest.
+            VPNRange::new(old_start, remove_start)
+        };
+        tail
     }
     /// data: start-aligned but maybe with shorter length
     /// assume that all frames were cleared before

@@ -14,7 +14,9 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -133,6 +135,43 @@ impl TaskManager {
         inner.tasks[cur].change_program_brk(size)
     }
 
+    /// Record one invocation of `syscall_id` by the current task.
+    ///
+    /// This is called before dispatching the syscall, so `sys_trace`
+    /// itself is counted as well (which is what the trace test expects).
+    pub fn add_syscall_count(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        if syscall_id < MAX_SYSCALL_NUM {
+            inner.tasks[cur].syscall_cnt[syscall_id] += 1;
+        }
+    }
+
+    /// Return how many times the current task has invoked `syscall_id`.
+    pub fn get_syscall_count(&self, syscall_id: usize) -> isize {
+        let inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        if syscall_id < MAX_SYSCALL_NUM {
+            inner.tasks[cur].syscall_cnt[syscall_id] as isize
+        } else {
+            -1
+        }
+    }
+
+    /// Try to map an anonymous area in the current task's address space.
+    pub fn mmap_current(&self, start: VirtAddr, len: usize, permission: MapPermission) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].memory_set.mmap(start, len, permission)
+    }
+
+    /// Try to unmap a range in the current task's address space.
+    pub fn munmap_current(&self, start: VirtAddr, len: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].memory_set.munmap(start, len)
+    }
+
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
@@ -201,4 +240,14 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Try to map an anonymous area in the current task's address space.
+pub fn mmap_current(start: VirtAddr, len: usize, permission: MapPermission) -> bool {
+    TASK_MANAGER.mmap_current(start, len, permission)
+}
+
+/// Try to unmap a range in the current task's address space.
+pub fn munmap_current(start: VirtAddr, len: usize) -> bool {
+    TASK_MANAGER.munmap_current(start, len)
 }
