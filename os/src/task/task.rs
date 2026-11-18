@@ -1,6 +1,8 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
-use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
+use super::{
+    kstack_alloc, pid_alloc, try_kstack_alloc, try_pid_alloc, KernelStack, PidHandle,
+};
 use crate::config::TRAP_CONTEXT_BASE;
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
@@ -68,7 +70,16 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Scheduling priority
+    pub priority: usize,
+
+    /// Stride scheduling pass value
+    pub pass: usize,
 }
+
+/// Default scheduling priority of a new process
+pub const DEFAULT_PRIORITY: usize = 16;
 
 impl TaskControlBlockInner {
     /// get the trap context
@@ -118,6 +129,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: DEFAULT_PRIORITY,
+                    pass: 0,
                 })
             },
         };
@@ -191,6 +204,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: parent_inner.priority,
+                    pass: 0,
                 })
             },
         });
@@ -204,6 +219,64 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// Create a new process from an ELF without copying the parent's address space.
+    /// Returns None if the process pool or memory is exhausted.
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Option<Arc<Self>> {
+        // build a brand-new address space directly from the ELF
+        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let trap_cx_ppn = memory_set
+            .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
+            .unwrap()
+            .ppn();
+        // checked allocation: may fail when the process pool is full
+        let pid_handle = try_pid_alloc()?;
+        let kernel_stack = try_kstack_alloc()?;
+        let kernel_stack_top = kernel_stack.get_top();
+        let task_control_block = Arc::new(TaskControlBlock {
+            pid: pid_handle,
+            kernel_stack,
+            inner: unsafe {
+                UPSafeCell::new(TaskControlBlockInner {
+                    trap_cx_ppn,
+                    base_size: user_sp,
+                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                    task_status: TaskStatus::Ready,
+                    memory_set,
+                    parent: Some(Arc::downgrade(self)),
+                    children: Vec::new(),
+                    exit_code: 0,
+                    heap_bottom: user_sp,
+                    program_brk: user_sp,
+                    priority: DEFAULT_PRIORITY,
+                    pass: 0,
+                })
+            },
+        });
+        // prepare TrapContext in user space
+        let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
+        *trap_cx = TrapContext::app_init_context(
+            entry_point,
+            user_sp,
+            KERNEL_SPACE.exclusive_access().token(),
+            kernel_stack_top,
+            trap_handler as usize,
+        );
+        // add child to parent's children list
+        self.inner_exclusive_access()
+            .children
+            .push(task_control_block.clone());
+        Some(task_control_block)
+    }
+
+    /// Set priority, return the new priority or -1 if invalid
+    pub fn set_priority(&self, prio: isize) -> isize {
+        if prio < 2 {
+            return -1;
+        }
+        self.inner_exclusive_access().priority = prio as usize;
+        prio
     }
 
     /// get pid of process

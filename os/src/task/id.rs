@@ -21,13 +21,18 @@ impl RecycleAllocator {
             recycled: Vec::new(),
         }
     }
-    pub fn alloc(&mut self) -> usize {
+    pub fn try_alloc(&mut self) -> Option<usize> {
         if let Some(id) = self.recycled.pop() {
-            id
-        } else {
+            Some(id)
+        } else if self.current < crate::config::MAX_PROCESS {
             self.current += 1;
-            self.current - 1
+            Some(self.current - 1)
+        } else {
+            None
         }
+    }
+    pub fn alloc(&mut self) -> usize {
+        self.try_alloc().expect("process pool is full")
     }
     pub fn dealloc(&mut self, id: usize) {
         assert!(id < self.current);
@@ -57,6 +62,11 @@ impl Drop for PidHandle {
     }
 }
 
+/// Allocate a new PID, return None if the process pool is full
+pub fn try_pid_alloc() -> Option<PidHandle> {
+    PID_ALLOCATOR.exclusive_access().try_alloc().map(PidHandle)
+}
+
 /// Allocate a new PID
 pub fn pid_alloc() -> PidHandle {
     PidHandle(PID_ALLOCATOR.exclusive_access().alloc())
@@ -74,14 +84,19 @@ pub struct KernelStack(pub usize);
 
 /// allocate a new kernel stack
 pub fn kstack_alloc() -> KernelStack {
-    let kstack_id = KSTACK_ALLOCATOR.exclusive_access().alloc();
+    try_kstack_alloc().expect("process pool is full")
+}
+
+/// allocate a new kernel stack, return None if the process pool is full
+pub fn try_kstack_alloc() -> Option<KernelStack> {
+    let kstack_id = KSTACK_ALLOCATOR.exclusive_access().try_alloc()?;
     let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
     KERNEL_SPACE.exclusive_access().insert_framed_area(
         kstack_bottom.into(),
         kstack_top.into(),
         MapPermission::R | MapPermission::W,
     );
-    KernelStack(kstack_id)
+    Some(KernelStack(kstack_id))
 }
 
 impl Drop for KernelStack {

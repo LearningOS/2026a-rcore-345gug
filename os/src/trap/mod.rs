@@ -15,6 +15,7 @@
 mod context;
 
 use crate::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
+use crate::sync::BIG_KERNEL_LOCK;
 use crate::syscall::syscall;
 use crate::task::{
     current_trap_cx, current_user_token, exit_current_and_run_next, suspend_current_and_run_next,
@@ -59,6 +60,8 @@ pub fn enable_timer_interrupt() {
 /// trap handler
 #[no_mangle]
 pub fn trap_handler() -> ! {
+    // all kernel execution is serialized by the big kernel lock
+    BIG_KERNEL_LOCK.lock();
     set_kernel_trap_entry();
     let scause = scause::read();
     let stval = stval::read();
@@ -125,6 +128,8 @@ pub fn trap_return() -> ! {
     }
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     // trace!("[kernel] trap_return: ..before return");
+    // leaving the kernel: let other harts enter the kernel
+    BIG_KERNEL_LOCK.unlock();
     unsafe {
         asm!(
             "fence.i",

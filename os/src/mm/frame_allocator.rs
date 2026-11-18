@@ -103,6 +103,12 @@ pub fn init_frame_allocator() {
     );
 }
 
+/// Number of physical page frames that can still be allocated
+pub fn available_frames() -> usize {
+    let allocator = FRAME_ALLOCATOR.exclusive_access();
+    allocator.recycled.len() + (allocator.end - allocator.current)
+}
+
 /// Allocate a physical page frame in FrameTracker style
 pub fn frame_alloc() -> Option<FrameTracker> {
     FRAME_ALLOCATOR

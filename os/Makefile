@@ -10,6 +10,8 @@ OFFLINE :=
 BOARD := qemu
 SBI ?= rustsbi
 BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
+# number of harts (multi-core challenge); keep 1 for the official tests
+SMP ?= 1
 
 # Building mode argument
 ifeq ($(MODE), release)
@@ -66,7 +68,7 @@ run: run-inner
 
 run-inner: build
 	@qemu-system-riscv64 \
-		-machine virt \
+		-machine virt -smp $(SMP) \
 		-nographic \
 		-bios $(BOOTLOADER) \
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)

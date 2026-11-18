@@ -7,10 +7,24 @@
 use super::__switch;
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
-use crate::sync::UPSafeCell;
+use crate::sync::{UPSafeCell, BIG_KERNEL_LOCK};
 use crate::trap::TrapContext;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::arch::asm;
 use lazy_static::*;
+
+/// maximum number of harts supported by the kernel
+pub const MAX_HARTS: usize = 8;
+
+/// read the hart id kept in `tp`
+pub fn hart_id() -> usize {
+    let id: usize;
+    unsafe {
+        asm!("mv {}, tp", out(reg) id);
+    }
+    id
+}
 
 /// Processor management structure
 pub struct Processor {
@@ -47,43 +61,61 @@ impl Processor {
 }
 
 lazy_static! {
-    pub static ref PROCESSOR: UPSafeCell<Processor> = unsafe { UPSafeCell::new(Processor::new()) };
+    /// one Processor per hart, indexed by hart id
+    pub static ref PROCESSORS: Vec<UPSafeCell<Processor>> = (0..MAX_HARTS)
+        .map(|_| unsafe { UPSafeCell::new(Processor::new()) })
+        .collect();
+}
+
+/// get the Processor of the current hart
+fn get_processor() -> &'static UPSafeCell<Processor> {
+    &PROCESSORS[hart_id()]
 }
 
 ///The main part of process execution and scheduling
 ///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
-pub fn run_tasks() {
+pub fn run_tasks() -> ! {
     loop {
-        let mut processor = PROCESSOR.exclusive_access();
-        if let Some(task) = fetch_task() {
-            let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
-            // access coming task TCB exclusively
-            let mut task_inner = task.inner_exclusive_access();
-            let next_task_cx_ptr = &task_inner.task_cx as *const TaskContext;
-            task_inner.task_status = TaskStatus::Running;
-            // release coming task_inner manually
-            drop(task_inner);
-            // release coming task TCB manually
-            processor.current = Some(task);
-            // release processor manually
-            drop(processor);
-            unsafe {
-                __switch(idle_task_cx_ptr, next_task_cx_ptr);
+        let switched = {
+            let mut processor = get_processor().exclusive_access();
+            if let Some(task) = fetch_task() {
+                let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
+                // access coming task TCB exclusively
+                let mut task_inner = task.inner_exclusive_access();
+                let next_task_cx_ptr = &task_inner.task_cx as *const TaskContext;
+                task_inner.task_status = TaskStatus::Running;
+                // release coming task_inner manually
+                drop(task_inner);
+                // release coming task TCB manually
+                processor.current = Some(task);
+                // release processor manually
+                drop(processor);
+                unsafe {
+                    __switch(idle_task_cx_ptr, next_task_cx_ptr);
+                }
+                true
+            } else {
+                false
             }
-        } else {
-            warn!("no tasks available in run_tasks");
+        };
+        if !switched {
+            // No ready task: release the kernel lock so that tasks running
+            // on other harts can trap into the kernel, then retry.
+            BIG_KERNEL_LOCK.unlock();
+            core::hint::spin_loop();
+            BIG_KERNEL_LOCK.lock();
         }
     }
 }
 
 /// Get current task through take, leaving a None in its place
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
-    PROCESSOR.exclusive_access().take_current()
+    get_processor().exclusive_access().take_current()
 }
 
 /// Get a copy of the current task
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
-    PROCESSOR.exclusive_access().current()
+    get_processor().exclusive_access().current()
 }
 
 /// Get the current user token(addr of page table)
@@ -102,7 +134,7 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 
 ///Return to idle control flow for new scheduling
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
-    let mut processor = PROCESSOR.exclusive_access();
+    let mut processor = get_processor().exclusive_access();
     let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
     drop(processor);
     unsafe {

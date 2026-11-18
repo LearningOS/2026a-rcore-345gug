@@ -300,6 +300,55 @@ impl MemorySet {
             false
         }
     }
+
+    /// map a new anonymous area, return false on conflict or bad arguments
+    pub fn mmap(&mut self, start: VirtAddr, end: VirtAddr, perm: MapPermission) -> bool {
+        if !start.aligned() || start >= end {
+            return false;
+        }
+        let (start_vpn, end_vpn) = (start.floor(), end.ceil());
+        if self
+            .areas
+            .iter()
+            .any(|area| area.vpn_range.get_start() < end_vpn && start_vpn < area.vpn_range.get_end())
+        {
+            return false;
+        }
+        self.push(MapArea::new(start, end, MapType::Framed, perm), None);
+        true
+    }
+
+    /// unmap an existing anonymous area with exactly the same range
+    pub fn munmap(&mut self, start: VirtAddr, end: VirtAddr) -> bool {
+        if !start.aligned() || start >= end {
+            return false;
+        }
+        let (start_vpn, end_vpn) = (start.floor(), end.ceil());
+        if let Some(idx) = self.areas.iter().position(|area| {
+            area.vpn_range.get_start() == start_vpn && area.vpn_range.get_end() == end_vpn
+        }) {
+            let mut area = self.areas.remove(idx);
+            area.unmap(&mut self.page_table);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Number of page frames needed to load an ELF plus its kernel stack,
+/// used to reject `spawn` early when physical memory is insufficient.
+pub fn elf_load_frames(elf_data: &[u8]) -> Option<usize> {
+    let elf = xmas_elf::ElfFile::new(elf_data).ok()?;
+    let mut pages = 0usize;
+    for i in 0..elf.header.pt2.ph_count() {
+        let ph = elf.program_header(i).ok()?;
+        if ph.get_type().ok()? == xmas_elf::program::Type::Load {
+            pages += (ph.mem_size() as usize + PAGE_SIZE - 1) / PAGE_SIZE;
+        }
+    }
+    // page table frames, user stack, trap context and kernel stack, with margin
+    Some(pages + 16)
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {

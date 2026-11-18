@@ -45,6 +45,7 @@ pub mod task;
 pub mod timer;
 pub mod trap;
 
+use crate::sync::BIG_KERNEL_LOCK;
 use core::arch::global_asm;
 
 global_asm!(include_str!("entry.asm"));
@@ -97,6 +98,21 @@ fn kernel_log_info() {
     error!("[kernel] .bss [{:#x}, {:#x})", sbss as usize, ebss as usize);
 }
 
+/// entry point of the secondary harts started through SBI HSM.
+/// `hartid` is passed in a0 by the firmware.
+#[no_mangle]
+pub extern "C" fn secondary_main(hartid: usize) -> ! {
+    // serialize with the boot hart and with other harts
+    BIG_KERNEL_LOCK.lock();
+    // HSM starts a hart in bare mode; switch to the kernel address space
+    mm::KERNEL_SPACE.exclusive_access().activate();
+    trap::init();
+    trap::enable_timer_interrupt();
+    timer::set_next_trigger();
+    println!("[kernel] secondary hart {} started", hartid);
+    task::run_tasks();
+}
+
 #[no_mangle]
 /// the rust entry-point of os
 pub fn rust_main() -> ! {
@@ -110,6 +126,17 @@ pub fn rust_main() -> ! {
     trap::enable_timer_interrupt();
     timer::set_next_trigger();
     loader::list_apps();
+    // from now on the boot hart holds the big kernel lock
+    BIG_KERNEL_LOCK.lock();
+    // bring up the other harts if the firmware supports SBI HSM
+    extern "C" {
+        fn secondary_entry();
+    }
+    for hartid in 1..task::MAX_HARTS {
+        let ret = sbi::hart_start(hartid, secondary_entry as usize, hartid);
+        if ret != 0 {
+            debug!("hart {} not started: {}", hartid, ret);
+        }
+    }
     task::run_tasks();
-    panic!("Unreachable in rust_main!");
 }
