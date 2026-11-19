@@ -125,6 +125,17 @@ impl EasyFileSystem {
     pub fn get_data_block_id(&self, data_block_id: u32) -> u32 {
         self.data_area_start_block + data_block_id
     }
+    /// Get inode id from the position (block id and offset) of a disk inode.
+    ///
+    /// easy-fs 的 `Inode` 只记录自己在磁盘上的位置, 不直接保存 inode 编号.
+    /// 而 `fstat` 需要返回 inode 编号, `link` 也需要用编号构造目录项,
+    /// 因此这里把磁盘位置换算回 inode 编号.
+    pub fn get_inode_id(&self, block_id: u32, block_offset: usize) -> u32 {
+        let inode_size = core::mem::size_of::<DiskInode>();
+        let inodes_per_block = BLOCK_SZ / inode_size;
+        (block_id - self.inode_area_start_block) * inodes_per_block as u32
+            + (block_offset / inode_size) as u32
+    }
     /// Allocate a new inode
     pub fn alloc_inode(&mut self) -> u32 {
         self.inode_bitmap.alloc(&self.block_device).unwrap() as u32

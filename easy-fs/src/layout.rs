@@ -82,6 +82,8 @@ type DataBlock = [u8; BLOCK_SZ];
 #[repr(C)]
 pub struct DiskInode {
     pub size: u32,
+    /// 硬链接数量: 有多少个目录项指向该磁盘 inode
+    pub nlink: u32,
     pub direct: [u32; INODE_DIRECT_COUNT],
     pub indirect1: u32,
     pub indirect2: u32,
@@ -93,6 +95,8 @@ impl DiskInode {
     /// indirect1 and indirect2 block are allocated only when they are needed
     pub fn initialize(&mut self, type_: DiskInodeType) {
         self.size = 0;
+        // 新建的 inode 必然被创建它的那个目录项引用, 因此初始硬链接数为 1
+        self.nlink = 1;
         self.direct.iter_mut().for_each(|v| *v = 0);
         self.indirect1 = 0;
         self.indirect2 = 0;
