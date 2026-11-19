@@ -3,12 +3,14 @@
 use alloc::sync::Arc;
 
 use crate::{
+    config::PAGE_SIZE,
     fs::{open_file, OpenFlags},
-    mm::{translated_refmut, translated_str},
+    mm::{translated_refmut, translated_str, MapPermission},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next,
+        suspend_current_and_run_next, TaskControlBlock,
     },
+    timer::get_time_us,
 };
 
 #[repr(C)]
@@ -102,33 +104,59 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     // ---- release current PCB automatically
 }
 
-/// YOUR JOB: get time with second and microsecond
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// get time with second and microsecond
+///
+/// `TimeVal` 可能跨越页边界, 因此分别通过用户页表写 `sec` 和 `usec` 两个
+/// `usize` 字段, 而不是把整个结构体当成一个连续用户缓冲区.
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    trace!("kernel:pid[{}] sys_get_time", current_task().unwrap().pid.0);
+    let token = current_user_token();
+    let us = get_time_us();
+    let sec_ptr = ts as *mut usize;
+    let usec_ptr = (ts as usize + core::mem::size_of::<usize>()) as *mut usize;
+    *translated_refmut(token, sec_ptr) = us / 1_000_000;
+    *translated_refmut(token, usec_ptr) = us % 1_000_000;
+    0
 }
 
-/// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// Implement mmap: map an anonymous, zero-filled memory area.
+/// `port` uses 1/2/4 for read/write/execute.
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
+    trace!("kernel:pid[{}] sys_mmap", current_task().unwrap().pid.0);
+    if start % PAGE_SIZE != 0 || len == 0 || port == 0 || port > 7 {
+        return -1;
+    }
+    let end = match start.checked_add(len) {
+        Some(end) => end,
+        None => return -1,
+    };
+    let perm = MapPermission::U | MapPermission::from_bits_truncate((port << 1) as u8);
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    if inner.memory_set.mmap(start.into(), end.into(), perm) {
+        0
+    } else {
+        -1
+    }
 }
 
-/// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// Implement munmap: unmap an area whose range exactly matches a mapped area.
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    trace!("kernel:pid[{}] sys_munmap", current_task().unwrap().pid.0);
+    if start % PAGE_SIZE != 0 || len == 0 {
+        return -1;
+    }
+    let end = match start.checked_add(len) {
+        Some(end) => end,
+        None => return -1,
+    };
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    if inner.memory_set.munmap(start.into(), end.into()) {
+        0
+    } else {
+        -1
+    }
 }
 
 /// change data segment size
@@ -141,14 +169,29 @@ pub fn sys_sbrk(size: i32) -> isize {
     }
 }
 
-/// YOUR JOB: Implement spawn.
-/// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// Implement spawn: create a new process from `path` without copying the
+/// parent's address space. Returns the new pid, or -1 if the program does
+/// not exist.
+pub fn sys_spawn(path: *const u8) -> isize {
+    trace!("kernel:pid[{}] sys_spawn", current_task().unwrap().pid.0);
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) else {
+        return -1;
+    };
+    let all_data = app_inode.read_all();
+    let current = current_task().unwrap();
+    // 直接从 ELF 构造全新地址空间, 不复制父进程的地址空间
+    let new_task = Arc::new(TaskControlBlock::new(all_data.as_slice()));
+    let new_pid = new_task.getpid();
+    // 建立父子关系, 使父进程可以用 wait/waitpid 回收该子进程
+    new_task.inner_exclusive_access().parent = Some(Arc::downgrade(&current));
+    current
+        .inner_exclusive_access()
+        .children
+        .push(new_task.clone());
+    add_task(new_task);
+    new_pid as isize
 }
 
 // YOUR JOB: Set task priority.

@@ -4,7 +4,7 @@
 //!
 //! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
 //! need to wrap `OSInodeInner` into `UPSafeCell`
-use super::File;
+use super::{File, Stat, StatMode};
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
@@ -56,6 +56,9 @@ impl OSInode {
 }
 
 lazy_static! {
+    /// The root inode of the easy-fs file system.
+    ///
+    /// `linkat` / `unlinkat` 都只在根目录下操作, 因此这里把它暴露给系统调用层.
     pub static ref ROOT_INODE: Arc<Inode> = {
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
         Arc::new(EasyFileSystem::root_inode(&efs))
@@ -155,5 +158,21 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+    fn stat(&self) -> Stat {
+        let inner = self.inner.exclusive_access();
+        // 直接读取磁盘 inode, 因此通过任意一个硬链接看到的 nlink 都是一致的
+        let (ino, nlink, is_dir) = inner.inode.get_stat();
+        Stat {
+            dev: 0, // 本实验只有一个磁盘驱动器, 固定为 0
+            ino: ino as u64,
+            mode: if is_dir {
+                StatMode::DIR
+            } else {
+                StatMode::FILE
+            },
+            nlink,
+            pad: [0; 7],
+        }
     }
 }

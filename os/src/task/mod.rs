@@ -110,7 +110,12 @@ lazy_static! {
     /// the name "initproc" may be changed to any other app name like "usertests",
     /// but we have user_shell, so we don't need to change it.
     pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new({
-        let inode = open_file("ch6b_initproc", OpenFlags::RDONLY).unwrap();
+        // `make run TEST=1` 会把包括 ch6_usertest 在内的全部测例打包进文件系统,
+        // 此时优先运行 ch6_usertest; 普通 `make run` 只打包 ch*b_* 测例,
+        // 不会有 ch6_usertest, 于是回落到 ch6b_initproc (交互 shell), 保持原有行为.
+        let inode = open_file("ch6_usertest", OpenFlags::RDONLY)
+            .or_else(|| open_file("ch6b_initproc", OpenFlags::RDONLY))
+            .unwrap();
         let v = inode.read_all();
         TaskControlBlock::new(v.as_slice())
     });
