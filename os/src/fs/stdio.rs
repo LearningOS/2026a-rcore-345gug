@@ -16,7 +16,7 @@ impl File for Stdin {
     fn writable(&self) -> bool {
         false
     }
-    fn read(&self, mut user_buf: UserBuffer) -> usize {
+    fn read(&self, mut user_buf: UserBuffer) -> isize {
         assert_eq!(user_buf.len(), 1);
         // busy loop
         let mut c: usize;
@@ -35,7 +35,7 @@ impl File for Stdin {
         }
         1
     }
-    fn write(&self, _user_buf: UserBuffer) -> usize {
+    fn write(&self, _user_buf: UserBuffer) -> isize {
         panic!("Cannot write to stdin!");
     }
 }
@@ -47,13 +47,13 @@ impl File for Stdout {
     fn writable(&self) -> bool {
         true
     }
-    fn read(&self, _user_buf: UserBuffer) -> usize {
+    fn read(&self, _user_buf: UserBuffer) -> isize {
         panic!("Cannot read from stdout!");
     }
-    fn write(&self, user_buf: UserBuffer) -> usize {
+    fn write(&self, user_buf: UserBuffer) -> isize {
         for buffer in user_buf.buffers.iter() {
             print!("{}", core::str::from_utf8(*buffer).unwrap());
         }
-        user_buf.len()
+        user_buf.len() as isize
     }
 }

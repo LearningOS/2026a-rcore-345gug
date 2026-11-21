@@ -1,10 +1,11 @@
 use crate::{
     fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
+    mm::{translated_byte_buffer, translated_ref, translated_refmut, translated_str},
     task::{
         current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
         suspend_current_and_run_next, SignalFlags,
     },
+    timer::get_time_us,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 
@@ -148,15 +149,31 @@ pub fn sys_kill(pid: usize, signal: u32) -> isize {
 
 /// get_time syscall
 ///
-/// YOUR JOB: get time with second and microsecond
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+/// Write the current time (seconds + microseconds since boot) into the
+/// user-space [`TimeVal`].  The user pointer must be translated through the
+/// current page table; `TimeVal` (2 * usize) may also straddle a page
+/// boundary, so the write goes through `translated_byte_buffer` instead of a
+/// single `translated_refmut`.
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_get_time",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    let token = current_user_token();
+    let us = get_time_us();
+    let sec = us / 1_000_000;
+    let usec = us % 1_000_000;
+    // TimeVal is #[repr(C)] { usize sec; usize usec; } — serialize both
+    // fields in memory order (little endian on RISC-V).
+    let mut buf = translated_byte_buffer(token, ts as *const u8, 2 * core::mem::size_of::<usize>());
+    let mut bytes = buf.iter_mut().flat_map(|slice| slice.iter_mut());
+    for byte in sec.to_le_bytes().iter().chain(usec.to_le_bytes().iter()) {
+        match bytes.next() {
+            Some(ptr) => *ptr = *byte,
+            None => return -1,
+        }
+    }
+    0
 }
 
 /// mmap syscall

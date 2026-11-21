@@ -35,25 +35,31 @@ pub fn sys_mutex_create(blocking: bool) -> isize {
             .tid
     );
     let process = current_process();
-    let mutex: Option<Arc<dyn Mutex>> = if !blocking {
-        Some(Arc::new(MutexSpin::new()))
-    } else {
-        Some(Arc::new(MutexBlocking::new()))
-    };
     let mut process_inner = process.inner_exclusive_access();
-    if let Some(id) = process_inner
+    // Allocate the id first: `MutexBlocking` needs to remember it so that the
+    // deadlock detector can find the resource through the process' mutex list.
+    let (id, reused) = if let Some(id) = process_inner
         .mutex_list
         .iter()
         .enumerate()
         .find(|(_, item)| item.is_none())
         .map(|(id, _)| id)
     {
-        process_inner.mutex_list[id] = mutex;
-        id as isize
+        (id, true)
     } else {
-        process_inner.mutex_list.push(mutex);
-        process_inner.mutex_list.len() as isize - 1
+        (process_inner.mutex_list.len(), false)
+    };
+    let mutex: Arc<dyn Mutex> = if !blocking {
+        Arc::new(MutexSpin::new())
+    } else {
+        Arc::new(MutexBlocking::new(id))
+    };
+    if reused {
+        process_inner.mutex_list[id] = Some(mutex);
+    } else {
+        process_inner.mutex_list.push(Some(mutex));
     }
+    id as isize
 }
 /// mutex lock syscall
 pub fn sys_mutex_lock(mutex_id: usize) -> isize {
@@ -73,8 +79,8 @@ pub fn sys_mutex_lock(mutex_id: usize) -> isize {
     let mutex = Arc::clone(process_inner.mutex_list[mutex_id].as_ref().unwrap());
     drop(process_inner);
     drop(process);
-    mutex.lock();
-    0
+    // 0 on success, -0xdead when blocking would deadlock.
+    mutex.lock() as isize
 }
 /// mutex unlock syscall
 pub fn sys_mutex_unlock(mutex_id: usize) -> isize {
@@ -112,21 +118,24 @@ pub fn sys_semaphore_create(res_count: usize) -> isize {
     );
     let process = current_process();
     let mut process_inner = process.inner_exclusive_access();
-    let id = if let Some(id) = process_inner
+    let (id, reused) = if let Some(id) = process_inner
         .semaphore_list
         .iter()
         .enumerate()
         .find(|(_, item)| item.is_none())
         .map(|(id, _)| id)
     {
-        process_inner.semaphore_list[id] = Some(Arc::new(Semaphore::new(res_count)));
-        id
+        (id, true)
     } else {
-        process_inner
-            .semaphore_list
-            .push(Some(Arc::new(Semaphore::new(res_count))));
-        process_inner.semaphore_list.len() - 1
+        (process_inner.semaphore_list.len(), false)
     };
+    // The id is stored inside the semaphore for deadlock detection.
+    let sem = Arc::new(Semaphore::new(res_count, id));
+    if reused {
+        process_inner.semaphore_list[id] = Some(sem);
+    } else {
+        process_inner.semaphore_list.push(Some(sem));
+    }
     id as isize
 }
 /// semaphore up syscall
@@ -166,8 +175,8 @@ pub fn sys_semaphore_down(sem_id: usize) -> isize {
     let process_inner = process.inner_exclusive_access();
     let sem = Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap());
     drop(process_inner);
-    sem.down();
-    0
+    // 0 on success, -0xdead when blocking would deadlock.
+    sem.down() as isize
 }
 /// condvar create syscall
 pub fn sys_condvar_create() -> isize {
@@ -244,8 +253,12 @@ pub fn sys_condvar_wait(condvar_id: usize, mutex_id: usize) -> isize {
 }
 /// enable deadlock detection syscall
 ///
-/// YOUR JOB: Implement deadlock detection, but might not all in this syscall
-pub fn sys_enable_deadlock_detect(_enabled: usize) -> isize {
-    trace!("kernel: sys_enable_deadlock_detect NOT IMPLEMENTED");
-    -1
+/// Deadlock detection itself lives in [`crate::sync::deadlock`]; it is called
+/// from the blocking mutex `lock` and semaphore `down` paths.  This syscall
+/// only flips the per-process switch.
+pub fn sys_enable_deadlock_detect(enabled: usize) -> isize {
+    trace!("kernel: sys_enable_deadlock_detect {}", enabled);
+    let process = current_process();
+    process.inner_exclusive_access().deadlock_detect = enabled != 0;
+    0
 }

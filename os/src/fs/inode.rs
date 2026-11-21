@@ -130,7 +130,7 @@ impl File for OSInode {
         self.writable
     }
     /// read file data into buffer
-    fn read(&self, mut buf: UserBuffer) -> usize {
+    fn read(&self, mut buf: UserBuffer) -> isize {
         trace!("kernel: OSInode::read");
         let mut inner = self.inner.exclusive_access();
         let mut total_read_size = 0usize;
@@ -142,10 +142,10 @@ impl File for OSInode {
             inner.offset += read_size;
             total_read_size += read_size;
         }
-        total_read_size
+        total_read_size as isize
     }
     /// write buffer data into file
-    fn write(&self, buf: UserBuffer) -> usize {
+    fn write(&self, buf: UserBuffer) -> isize {
         trace!("kernel: OSInode::write");
         let mut inner = self.inner.exclusive_access();
         let mut total_write_size = 0usize;
@@ -155,6 +155,6 @@ impl File for OSInode {
             inner.offset += write_size;
             total_write_size += write_size;
         }
-        total_write_size
+        total_write_size as isize
     }
 }

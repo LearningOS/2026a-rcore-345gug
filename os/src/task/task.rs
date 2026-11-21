@@ -2,6 +2,7 @@
 
 use super::id::TaskUserRes;
 use super::{kstack_alloc, KernelStack, ProcessControlBlock, TaskContext};
+use crate::sync::ResourceKind;
 use crate::trap::TrapContext;
 use crate::{mm::PhysPageNum, sync::UPSafeCell};
 use alloc::sync::{Arc, Weak};
@@ -41,6 +42,11 @@ pub struct TaskControlBlockInner {
     pub task_status: TaskStatus,
     /// It is set when active exit or execution error occurs
     pub exit_code: Option<i32>,
+    /// Set while the task is blocked on a mutex/semaphore.  The pair is
+    /// `(kind, resource id)`; it is used to build the wait-for graph for
+    /// deadlock detection.  `None` when the task is not waiting for one of
+    /// those two resource types.
+    pub waiting_for: Option<(ResourceKind, usize)>,
 }
 
 impl TaskControlBlockInner {
@@ -75,6 +81,7 @@ impl TaskControlBlock {
                     task_cx: TaskContext::goto_trap_return(kstack_top),
                     task_status: TaskStatus::Ready,
                     exit_code: None,
+                    waiting_for: None,
                 })
             },
         }

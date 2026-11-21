@@ -15,6 +15,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
 
+/// Maximum number of file descriptors a process may own.
+///
+/// This mirrors Linux' default `RLIMIT_NOFILE` (1024).  `sys_eventfd2` is the
+/// syscall that is required to check this limit by the lab handout; `open`,
+/// `pipe` and `dup` keep the permissive behaviour of the original template.
+pub const MAX_FD: usize = 1024;
+
 /// Process Control Block
 pub struct ProcessControlBlock {
     /// immutable
@@ -49,6 +56,8 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// whether wait-for-graph deadlock detection is enabled for this process
+    pub deadlock_detect: bool,
 }
 
 impl ProcessControlBlockInner {
@@ -65,6 +74,14 @@ impl ProcessControlBlockInner {
             self.fd_table.push(None);
             self.fd_table.len() - 1
         }
+    }
+    /// Whether the fd table is full.
+    ///
+    /// A table that already has `MAX_FD` entries can still accept a new fd if
+    /// some entries were closed (alloc_fd reuses the holes); only a table with
+    /// no holes and length >= `MAX_FD` is really full.
+    pub fn fd_table_full(&self) -> bool {
+        self.fd_table.len() >= MAX_FD && self.fd_table.iter().all(|fd| fd.is_some())
     }
     /// allocate a new task id
     pub fn alloc_tid(&mut self) -> usize {
@@ -119,6 +136,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect: false,
                 })
             },
         });
@@ -245,6 +263,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect: false,
                 })
             },
         });

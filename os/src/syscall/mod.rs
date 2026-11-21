@@ -44,6 +44,10 @@ pub const SYSCALL_SIGRETURN: usize = 139;
 pub const SYSCALL_GETTIMEOFDAY: usize = 169;
 /// getpid syscall
 pub const SYSCALL_GETPID: usize = 172;
+/// legacy eventfd syscall (no flags argument)
+pub const SYSCALL_EVENTFD: usize = 284;
+/// eventfd2 syscall (with flags argument)
+pub const SYSCALL_EVENTFD2: usize = 290;
 /// gettid syscall
 pub const SYSCALL_GETTID: usize = 178;
 /// fork syscall
@@ -127,6 +131,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
         SYSCALL_SLEEP => sys_sleep(args[0]),
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_GETPID => sys_getpid(),
+        SYSCALL_EVENTFD => sys_eventfd(args[0] as u32),
+        SYSCALL_EVENTFD2 => sys_eventfd2(args[0] as u32, args[1] as i32),
         SYSCALL_GETTID => sys_gettid(),
         SYSCALL_FORK => sys_fork(),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize),

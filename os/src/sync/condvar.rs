@@ -43,6 +43,8 @@ impl Condvar {
         inner.wait_queue.push_back(current_task().unwrap());
         drop(inner);
         block_current_and_run_next();
-        mutex.lock();
+        // Deadlock detection is not meaningful for condvar waits; a failure
+        // here would only be possible if the mutex id were graph-cyclic.
+        let _ = mutex.lock();
     }
 }

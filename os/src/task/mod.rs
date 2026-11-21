@@ -26,7 +26,7 @@ use crate::timer::remove_timer;
 use alloc::{sync::Arc, vec::Vec};
 use lazy_static::*;
 use manager::fetch_task;
-use process::ProcessControlBlock;
+pub use process::ProcessControlBlock;
 use switch::__switch;
 
 pub use context::TaskContext;
@@ -173,7 +173,13 @@ lazy_static! {
     /// the name "initproc" may be changed to any other app name like "usertests",
     /// but we have user_shell, so we don't need to change it.
     pub static ref INITPROC: Arc<ProcessControlBlock> = {
-        let inode = open_file("ch8b_initproc", OpenFlags::RDONLY).unwrap();
+        // Prefer the ch8 usertest image when it is present in fs.img (it is
+        // built by `make TEST=1` and by ci-user, which also copies it over
+        // ch8b_initproc.elf).  Otherwise fall back to the interactive shell
+        // so that a plain `make run` still works.
+        let inode = open_file("ch8_usertest", OpenFlags::RDONLY)
+            .or_else(|| open_file("ch8b_initproc", OpenFlags::RDONLY))
+            .unwrap();
         let v = inode.read_all();
         ProcessControlBlock::new(v.as_slice())
     };
